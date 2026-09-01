@@ -1,0 +1,11 @@
+data
+sample_runs
+**/__pycache__
+**/.pytest_cache
+.git
+*.command
+run.sh
+ARCHITECTURE.md
+README.md
+ffmpeg_bundle*
+bin

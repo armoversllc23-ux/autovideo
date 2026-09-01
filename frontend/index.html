@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AutoVideo — one description, one video</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app">
+    <!-- Screen 1: Describe -->
+    <section id="screen-describe" class="screen screen--active">
+      <div class="card">
+        <h1>Make a video in one sentence</h1>
+        <p class="subtitle">Tell us what it's for. We'll handle the story, visuals, music, and editing.</p>
+
+        <label for="description" class="field-label">Describe the video you want to create…</label>
+        <textarea
+          id="description"
+          rows="4"
+          placeholder="e.g. Fun birthday video for my mom, 30 seconds, for Instagram"
+        ></textarea>
+        <p class="hint">
+          Try: "Elegant wedding highlight for YouTube" · "Celebration of life video for my grandpa"
+          · "Quick TikTok promo for our new coffee shop"
+        </p>
+
+        <div class="media-row">
+          <button id="add-media-btn" type="button" class="btn btn--secondary">
+            📷 Add photos/videos <span class="optional">(optional)</span>
+          </button>
+          <input id="media-input" type="file" accept="image/*,video/*" multiple hidden />
+          <span id="media-count" class="media-count"></span>
+        </div>
+
+        <button id="create-btn" type="button" class="btn btn--primary btn--large">
+          Create video
+        </button>
+        <p id="describe-error" class="error-text" hidden></p>
+      </div>
+    </section>
+
+    <!-- Screen 2: Progress -->
+    <section id="screen-progress" class="screen">
+      <div class="card card--center">
+        <div class="spinner" aria-hidden="true"></div>
+        <h2 id="progress-message">Understanding your description…</h2>
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Screen 3: Result -->
+    <section id="screen-result" class="screen">
+      <div class="card card--center">
+        <h2>Your video is ready!</h2>
+        <video id="result-video" controls playsinline></video>
+
+        <div class="result-actions">
+          <a id="download-btn" class="btn btn--primary" download>Download</a>
+          <button id="share-btn" type="button" class="btn btn--primary">Share</button>
+        </div>
+        <button id="variant-btn" type="button" class="btn btn--text">
+          🔁 Try a different version
+        </button>
+        <button id="start-over-btn" type="button" class="btn btn--text">
+          Start a new video
+        </button>
+        <p id="result-error" class="error-text" hidden></p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

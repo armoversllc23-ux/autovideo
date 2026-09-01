@@ -1,0 +1,7 @@
+data/
+sample_runs/
+**/__pycache__/
+**/.pytest_cache/
+ffmpeg_bundle*
+backend/bin/
+.venv/
