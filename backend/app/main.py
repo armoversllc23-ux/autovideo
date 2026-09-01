@@ -13,6 +13,7 @@ whole contract:
 """
 from __future__ import annotations
 
+import os
 import shutil
 import traceback
 from pathlib import Path
@@ -47,7 +48,9 @@ _renderer = Renderer()
 
 # Full resolution in the API path; tests use a smaller scale directly
 # against the pipeline modules (see backend/tests) to stay fast.
-_RESOLUTION_SCALE = 1.0
+# Overridable via env so memory-constrained hosts (e.g. a 512MB free-tier
+# container) can render at a lower scale without touching the code.
+_RESOLUTION_SCALE = float(os.environ.get("AUTOVIDEO_RESOLUTION_SCALE", "1.0"))
 
 
 # --------------------------------------------------------------------------
