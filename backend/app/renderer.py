@@ -268,15 +268,18 @@ class Renderer:
         palette = storyboard.palette
         top = _hex_to_rgb(palette.primary)
         bottom = _hex_to_rgb(palette.secondary)
-        img = Image.new("RGB", (width, height))
-        pixels = img.load()
+        # Build the vertical gradient as a 1px-wide column, then let PIL's
+        # (C-level) resize stretch it to full width — this is the same
+        # visual result as assigning every pixel from Python, but avoids a
+        # width*height Python-level loop, which is the difference between a
+        # rendering step and multi-second stall on a CPU-constrained host
+        # (e.g. a free-tier container) and is instant on a modern laptop.
+        grad = Image.new("RGB", (1, height))
+        grad_pixels = grad.load()
         for y in range(height):
             t = y / max(1, height - 1)
-            row_color = tuple(int(top[c] * (1 - t) + bottom[c] * t) for c in range(3))
-            for x in range(0, width, 4):  # step of 4: cheap perf win, banding is imperceptible
-                for dx in range(4):
-                    if x + dx < width:
-                        pixels[x + dx, y] = row_color
+            grad_pixels[0, y] = tuple(int(top[c] * (1 - t) + bottom[c] * t) for c in range(3))
+        img = grad.resize((width, height), Image.NEAREST)
 
         # Subtle decorative texture so a template card doesn't look like a
         # flat swatch: a few soft translucent circles in the accent color.
