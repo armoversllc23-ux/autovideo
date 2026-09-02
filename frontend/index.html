@@ -33,6 +33,24 @@
           <span id="media-count" class="media-count"></span>
         </div>
 
+        <p class="field-label">
+          Shape <span class="optional">(optional — we'll pick one for you otherwise)</span>
+        </p>
+        <div id="platform-picker" class="platform-picker" role="group" aria-label="Video shape">
+          <button type="button" class="shape-btn" data-platform="vertical" aria-pressed="false">
+            <span class="shape-swatch shape-swatch--vertical" aria-hidden="true"></span>
+            Vertical
+          </button>
+          <button type="button" class="shape-btn" data-platform="square" aria-pressed="false">
+            <span class="shape-swatch shape-swatch--square" aria-hidden="true"></span>
+            Square
+          </button>
+          <button type="button" class="shape-btn" data-platform="horizontal" aria-pressed="false">
+            <span class="shape-swatch shape-swatch--horizontal" aria-hidden="true"></span>
+            Horizontal
+          </button>
+        </div>
+
         <button id="create-btn" type="button" class="btn btn--primary btn--large">
           Create video
         </button>

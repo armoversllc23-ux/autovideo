@@ -2,9 +2,11 @@
 FastAPI API layer — the only thing the frontend talks to.
 
 Deliberately tiny surface area (see ARCHITECTURE.md section 5/6): there is
-no endpoint that lets the frontend choose occasion/platform/palette/etc.
-Those only ever come out of the pipeline. The four endpoints below are the
-whole contract:
+no endpoint that lets the frontend choose occasion/tone/palette/etc. Those
+only ever come out of the pipeline. The one deliberate exception is
+`platform`: an explicit aspect-ratio choice from the frontend's picker,
+which — when the person picks one — overrides whatever IntentParser would
+have inferred from the text alone (see `_apply_platform_override`).
 
   POST /api/videos             — start a job from text (+ optional media)
   GET  /api/videos/{id}        — poll status / get result metadata
@@ -15,6 +17,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -27,10 +31,10 @@ from pydantic import BaseModel
 
 from .intent_parser import IntentParser
 from .media_selector import MediaSelector
-from .models import JobStatus, RenderJob
+from .models import JobStatus, Platform, RenderJob
 from .renderer import Renderer
 from .storyboard_generator import StoryboardGenerator
-from .storage import job_store
+from .storage import job_store, JOBS_ROOT
 
 app = FastAPI(title="AutoVideo API")
 
@@ -51,6 +55,46 @@ _renderer = Renderer()
 # Overridable via env so memory-constrained hosts (e.g. a 512MB free-tier
 # container) can render at a lower scale without touching the code.
 _RESOLUTION_SCALE = float(os.environ.get("AUTOVIDEO_RESOLUTION_SCALE", "1.0"))
+
+# Renders are memory- and CPU-heavy relative to what a free-tier host has
+# available, so only one runs at a time — a second request queues behind
+# it rather than running concurrently (which is what actually caused the
+# free-tier instance to OOM: two renders' Pillow/ffmpeg memory live at
+# once easily clears 512MB even though neither alone would). FastAPI's
+# BackgroundTasks already run each request's task in its own thread, so
+# without this lock two POSTs really can render at the same time.
+_render_lock = threading.Lock()
+
+# How long a completed/failed job's working directory is kept before being
+# swept, so a busy instance's disk (and the job-store's in-memory dict)
+# doesn't grow without bound. Best-effort only — never allowed to fail a
+# request.
+_JOB_RETENTION_SECONDS = 2 * 60 * 60
+
+
+def _cleanup_old_jobs() -> None:
+    try:
+        cutoff = time.time() - _JOB_RETENTION_SECONDS
+        if not JOBS_ROOT.exists():
+            return
+        for job_dir in JOBS_ROOT.iterdir():
+            try:
+                if job_dir.is_dir() and job_dir.stat().st_mtime < cutoff:
+                    shutil.rmtree(job_dir, ignore_errors=True)
+            except Exception:
+                continue
+    except Exception:
+        pass  # cleanup is a nice-to-have; never let it break a request
+
+
+def _apply_platform_override(intent, platform_override: Optional[str]):
+    if not platform_override:
+        return intent
+    try:
+        platform = Platform(platform_override)
+    except ValueError:
+        return intent
+    return intent.model_copy(update={"platform": platform})
 
 
 # --------------------------------------------------------------------------
@@ -93,24 +137,34 @@ def _to_status_response(job: RenderJob) -> JobStatusResponse:
 # at each step (see brief section 6).
 # --------------------------------------------------------------------------
 
-def _run_pipeline(job_id: str, description: str, uploaded_paths: list[str], variant_seed: int = 0) -> None:
+def _run_pipeline(job_id: str, description: str, uploaded_paths: list[str], platform_override: Optional[str] = None, variant_seed: int = 0) -> None:
     try:
         job_store.update(job_id, status=JobStatus.PARSING, progress_message="Understanding your description...")
         intent = _intent_parser.parse(description, has_media=bool(uploaded_paths))
+        intent = _apply_platform_override(intent, platform_override)
 
         job_store.update(job_id, status=JobStatus.STORYBOARDING, progress_message="Writing your story...")
         storyboard = _storyboard_generator.generate(intent)
 
-        job_store.update(job_id, status=JobStatus.SELECTING_MEDIA, progress_message="Creating visuals and music...")
+        job_store.update(job_id, status=JobStatus.SELECTING_MEDIA, progress_message="Finding the right visuals...")
         media_paths = [Path(p) for p in uploaded_paths]
         storyboard = _media_selector.plan_media(storyboard, uploaded_media=media_paths, variant_seed=variant_seed)
         job_store.update(job_id, storyboard=storyboard)
 
-        job_store.update(job_id, status=JobStatus.RENDERING, progress_message="Rendering your video...")
-        job_dir = job_store.job_dir(job_id)
-        output_meta = _renderer.render(storyboard, job_dir, resolution_scale=_RESOLUTION_SCALE, variant_seed=variant_seed)
+        with _render_lock:
+            job_store.update(job_id, status=JobStatus.RENDERING, progress_message="Rendering your video...")
+            job_dir = job_store.job_dir(job_id)
+
+            def _on_progress(message: str) -> None:
+                job_store.update(job_id, progress_message=message)
+
+            output_meta = _renderer.render(
+                storyboard, job_dir, resolution_scale=_RESOLUTION_SCALE,
+                variant_seed=variant_seed, progress_cb=_on_progress,
+            )
 
         job_store.update(job_id, status=JobStatus.DONE, progress_message="Your video is ready!", output_meta=output_meta)
+        _cleanup_old_jobs()
     except Exception as exc:  # noqa: BLE001 - surface any pipeline failure to the user
         job_store.update(
             job_id,
@@ -129,6 +183,7 @@ def _run_pipeline(job_id: str, description: str, uploaded_paths: list[str], vari
 async def create_video(
     background_tasks: BackgroundTasks,
     description: str = Form(""),
+    platform: Optional[str] = Form(None),
     media: list[UploadFile] = File(default=[]),
 ) -> CreateVideoResponse:
     if not description or not description.strip():
@@ -150,7 +205,7 @@ async def create_video(
         saved_paths.append(str(dest))
 
     job_store.set_uploaded_paths(job.job_id, saved_paths)
-    background_tasks.add_task(_run_pipeline, job.job_id, description, saved_paths)
+    background_tasks.add_task(_run_pipeline, job.job_id, description, saved_paths, platform)
     return CreateVideoResponse(job_id=job.job_id)
 
 
@@ -197,17 +252,24 @@ def _run_variant_pipeline(job_id: str, uploaded_paths: list[str], variant_seed: 
         job = job_store.get(job_id)
         storyboard = job.storyboard  # same scenes/captions/narration as before
 
-        job_store.update(job_id, status=JobStatus.SELECTING_MEDIA, progress_message="Creating visuals and music...")
+        job_store.update(job_id, status=JobStatus.SELECTING_MEDIA, progress_message="Finding new visuals...")
         media_paths = [Path(p) for p in uploaded_paths]
         storyboard = _media_selector.plan_media(storyboard, uploaded_media=media_paths, variant_seed=variant_seed)
         job_store.update(job_id, storyboard=storyboard)
 
-        job_store.update(job_id, status=JobStatus.RENDERING, progress_message="Rendering your video...")
-        job_dir = job_store.job_dir(job_id)
-        output_meta = _renderer.render(
-            storyboard, job_dir, resolution_scale=_RESOLUTION_SCALE, variant_seed=variant_seed
-        )
+        with _render_lock:
+            job_store.update(job_id, status=JobStatus.RENDERING, progress_message="Rendering your video...")
+            job_dir = job_store.job_dir(job_id)
+
+            def _on_progress(message: str) -> None:
+                job_store.update(job_id, progress_message=message)
+
+            output_meta = _renderer.render(
+                storyboard, job_dir, resolution_scale=_RESOLUTION_SCALE,
+                variant_seed=variant_seed, progress_cb=_on_progress,
+            )
         job_store.update(job_id, status=JobStatus.DONE, progress_message="Your video is ready!", output_meta=output_meta)
+        _cleanup_old_jobs()
     except Exception as exc:  # noqa: BLE001
         job_store.update(job_id, status=JobStatus.FAILED, progress_message="Something went wrong.", error=f"{exc}")
         traceback.print_exc()

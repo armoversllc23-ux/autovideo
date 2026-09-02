@@ -32,6 +32,28 @@ mediaInput.addEventListener("change", () => {
   mediaCountEl.textContent = n > 0 ? `${n} file${n > 1 ? "s" : ""} selected` : "";
 });
 
+// ---- Shape (platform) picker ----------------------------------------------
+// Entirely optional: if the person never taps a shape, we send no `platform`
+// field at all and the backend infers one from the description text (see
+// `_apply_platform_override` in main.py, which only overrides when a value
+// is actually provided). Tapping the same shape again deselects it, going
+// back to "let AutoVideo decide".
+
+const platformButtons = Array.from(document.querySelectorAll(".shape-btn"));
+let selectedPlatform = null;
+
+platformButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const value = btn.dataset.platform;
+    selectedPlatform = selectedPlatform === value ? null : value;
+    platformButtons.forEach((b) => {
+      const isSelected = b.dataset.platform === selectedPlatform;
+      b.classList.toggle("shape-btn--selected", isSelected);
+      b.setAttribute("aria-pressed", String(isSelected));
+    });
+  });
+});
+
 createBtn.addEventListener("click", async () => {
   const description = descriptionEl.value.trim();
   describeError.hidden = true;
@@ -48,6 +70,9 @@ createBtn.addEventListener("click", async () => {
   try {
     const form = new FormData();
     form.append("description", description);
+    if (selectedPlatform) {
+      form.append("platform", selectedPlatform);
+    }
     for (const file of mediaInput.files) {
       form.append("media", file);
     }
@@ -82,9 +107,36 @@ const STAGE_WIDTH = {
   parsing: "20%",
   storyboarding: "45%",
   selecting_media: "68%",
-  rendering: "90%",
+  rendering: "68%", // fallback only — see renderingWidthPercent for the real, per-scene value
   done: "100%",
 };
+
+// The "rendering" status covers everything from the first scene clip to the
+// final muxed file, and the backend now sends per-scene progress messages
+// ("Rendering scene 2 of 4...", "Combining scenes...", "Adding music...")
+// instead of one flat message for the whole stage. This maps those messages
+// onto a width within [RENDERING_START, RENDERING_END] so the bar keeps
+// moving smoothly through what's usually the longest stage, rather than
+// sitting at a fixed 90% for the whole render.
+const RENDERING_START = 68;
+const RENDERING_END = 96;
+
+function renderingWidthPercent(message) {
+  const span = RENDERING_END - RENDERING_START;
+  const sceneMatch = /Rendering scene (\d+) of (\d+)/.exec(message || "");
+  if (sceneMatch) {
+    const current = Number(sceneMatch[1]);
+    const total = Number(sceneMatch[2]) || 1;
+    // Per-scene rendering is the bulk of the work; leave the tail of the
+    // range for the combine/music steps that follow the last scene.
+    const sceneShare = 0.75;
+    const fraction = Math.min(1, (current - 1) / total) * sceneShare;
+    return RENDERING_START + fraction * span;
+  }
+  if (/Combining scenes/i.test(message || "")) return RENDERING_START + span * 0.85;
+  if (/Adding music/i.test(message || "")) return RENDERING_START + span * 0.95;
+  return RENDERING_START;
+}
 
 let pollTimer = null;
 
@@ -101,7 +153,11 @@ async function checkStatus(jobId) {
     const status = await res.json();
 
     progressMessageEl.textContent = status.progress_message;
-    progressFillEl.style.width = STAGE_WIDTH[status.status] || "50%";
+    if (status.status === "rendering") {
+      progressFillEl.style.width = `${renderingWidthPercent(status.progress_message)}%`;
+    } else {
+      progressFillEl.style.width = STAGE_WIDTH[status.status] || "50%";
+    }
 
     if (status.status === "done") {
       clearInterval(pollTimer);
@@ -179,5 +235,10 @@ startOverBtn.addEventListener("click", () => {
   mediaInput.value = "";
   mediaCountEl.textContent = "";
   describeError.hidden = true;
+  selectedPlatform = null;
+  platformButtons.forEach((b) => {
+    b.classList.remove("shape-btn--selected");
+    b.setAttribute("aria-pressed", "false");
+  });
   showScreen("describe");
 });
