@@ -90,6 +90,18 @@ def synthesize_narration(text: str, out_stem: Path, voice: str) -> Optional[Path
     return None
 
 
+def _safe_unlink(path: Path) -> None:
+    """Best-effort delete. Some hosts/mounts this app can run on (a
+    permission-restricted directory, certain network/bridge-mounted
+    filesystems) allow *writing* a file but refuse to unlink it — that's a
+    filesystem quirk, not a synthesis failure, and must never be allowed to
+    turn a "clean up this leftover" step into a crashed render."""
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _synthesize_with_edge_tts(text: str, out_path: Path, voice: str) -> bool:
     if edge_tts is None:
         return False
@@ -102,11 +114,11 @@ def _synthesize_with_edge_tts(text: str, out_path: Path, voice: str) -> bool:
         # truncated) file behind from opening the output for write; clear
         # it out so it can't be mistaken for a real result and so the
         # per-job tmp dir doesn't accumulate dead files across scenes.
-        out_path.unlink(missing_ok=True)
+        _safe_unlink(out_path)
         return False
     ok = out_path.exists() and out_path.stat().st_size > _MIN_VALID_AUDIO_BYTES
     if not ok:
-        out_path.unlink(missing_ok=True)
+        _safe_unlink(out_path)
     return ok
 
 
