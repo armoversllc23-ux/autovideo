@@ -161,6 +161,80 @@ textarea:focus { border-color: var(--primary); }
 .shape-swatch--square { width: 22px; height: 22px; }
 .shape-swatch--horizontal { width: 26px; height: 16px; }
 
+/* Spoken-narration toggle */
+.voice-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: #fdfcfa;
+}
+
+.toggle {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-block;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.toggle-track {
+  display: block;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+
+.toggle-thumb {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 3px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.toggle input:checked + .toggle-track {
+  background: var(--primary);
+}
+.toggle input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+}
+.toggle input:focus-visible + .toggle-track {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.voice-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+.voice-row__title {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.voice-row__hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .error-text {
   color: #c0392b;
   font-size: 0.9rem;

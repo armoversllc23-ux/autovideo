@@ -15,14 +15,16 @@ the resolution appropriate for the target platform, with:
     FFmpeg's `xfade` filter
   - a synthesized two-chord music bed (see music_library.py) with a gentle
     tempo-synced pulse, fade-in/fade-out
+  - real spoken narration (see voiceover.py): each scene's `narration` text
+    is synthesized with a natural neural voice (falling back to an offline
+    synthesizer if that's unreachable), placed in sync with its scene, and
+    mixed in under a ducked music bed — on by default, toggleable from the
+    frontend (`ParsedIntent.overrides["voice"]`, see `_voice_enabled`)
 
 Where real production pieces plug in later (see ARCHITECTURE.md section 7):
   - Face-aware cropping: `_compose_user_media_frame` does a center-crop
     today; the TODO below marks exactly where a face-detection bounding
     box would change the crop rectangle.
-  - Narration/TTS: `Scene.narration` text already exists; a TTS engine
-    would synthesize per-scene audio here and the mixing step below would
-    duck the music under it.
   - Real stock photo attribution: stock_media.py deliberately keeps this
     abstraction narrow (bytes in, bytes out) — a version of this app that
     shows these videos publicly should track and surface each photo's
@@ -57,6 +59,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .models import Platform, RenderOutputMeta, StoryboardPlan, TransitionType, VisualSourceType
 from .music_library import MusicLibrary
 from .stock_media import fetch_stock_photo_file
+from .voiceover import synthesize_narration, voice_for_tone
 
 # --------------------------------------------------------------------------
 # Platform -> output resolution (full res). Tests/dev use `resolution_scale`
@@ -142,6 +145,53 @@ def _run(cmd: list[str]) -> None:
         raise RuntimeError(f"ffmpeg command failed ({' '.join(cmd)}):\n{result.stdout[-4000:]}")
 
 
+def _voice_enabled(storyboard: StoryboardPlan) -> bool:
+    """Narration defaults ON. It's an opt-*out* toggle (see the frontend's
+    "Add spoken narration" switch and `_apply_voice_override` in main.py),
+    stored in `ParsedIntent.overrides` — the same hidden-flag mechanism the
+    module docstring for that field was written for — so this needs no new
+    plumbing through the pipeline: it's already carried on the storyboard
+    and survives into "Try a different version" for free."""
+    return storyboard.intent.overrides.get("voice", "on") != "off"
+
+
+def _compute_scene_offsets(
+    durations: list[float], transitions: list[TransitionType]
+) -> tuple[list[float], list[float], float]:
+    """Where each scene's clip begins in the final, post-crossfade timeline
+    (scene 0 always starts at 0.0), plus each junction's actual (clamped)
+    crossfade duration. `_concat_with_transitions` needs this to place each
+    xfade; `_build_narration_track` needs the exact same numbers to place
+    spoken narration in sync with the visuals — sharing one function means
+    the two can never drift apart. Mirrors `_concat_with_transitions`'s
+    prior inline math exactly, just factored out."""
+    if not durations:
+        return [], [], 0.0
+    offsets = [0.0]
+    xfade_durs: list[float] = []
+    running_total = durations[0]
+    for i in range(1, len(durations)):
+        _, xfade_dur = _XFADE_BY_TRANSITION[transitions[i]]
+        xfade_dur = min(xfade_dur, durations[i] * 0.9, running_total * 0.9)
+        xfade_dur = max(xfade_dur, 0.05)
+        xfade_durs.append(xfade_dur)
+        offsets.append(max(0.0, running_total - xfade_dur))
+        running_total = running_total + durations[i] - xfade_dur
+    return offsets, xfade_durs, running_total
+
+
+def _probe_duration(path: Path) -> Optional[float]:
+    try:
+        probe = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            stdout=subprocess.PIPE, text=True, timeout=10,
+        )
+        return float(probe.stdout.strip())
+    except Exception:
+        return None
+
+
 def _release_memory() -> None:
     """Best-effort: force Python to garbage-collect and hand freed memory
     back to the OS. Long-lived Python processes doing heavy Pillow/ffmpeg
@@ -185,6 +235,14 @@ class Renderer:
             clip_paths, durations, transitions = self._render_scene_clips(
                 storyboard, tmp_dir, width, height, variant_seed, _notify
             )
+
+            narration_path = None
+            if _voice_enabled(storyboard):
+                _notify("Recording narration...")
+                offsets, _xfade_durs, preview_total = _compute_scene_offsets(durations, transitions)
+                narration_path = self._build_narration_track(storyboard, offsets, durations, preview_total, tmp_dir)
+                _release_memory()
+
             _notify("Combining scenes...")
             silent_video = tmp_dir / "silent.mp4"
             total_duration = self._concat_with_transitions(
@@ -194,7 +252,7 @@ class Renderer:
             _notify("Adding music...")
             output_path = job_dir / "output.mp4"
             self._mux_with_music(
-                silent_video, storyboard, total_duration, output_path, variant_seed
+                silent_video, storyboard, total_duration, output_path, variant_seed, narration_path
             )
 
             file_size = output_path.stat().st_size
@@ -476,6 +534,79 @@ class Renderer:
         path = _FONT_FILE_MAP.get(font_family, _FALLBACK_FONT)
         return ImageFont.truetype(path, size)
 
+    # -- stage 1b: synthesize + place spoken narration -----------------------
+
+    def _build_narration_track(
+        self, storyboard: StoryboardPlan, offsets: list[float], durations: list[float],
+        total_duration: float, tmp_dir: Path,
+    ) -> Optional[Path]:
+        """Synthesizes each scene's `narration` line (see voiceover.py) and
+        places it at that scene's actual start time in the final timeline,
+        mixing every scene's line into one full-length track. A scene with
+        no narration text, or whose synthesis fails outright (offline host,
+        blocked network path, timeout), simply contributes silence for its
+        span — never fails the render (same contract as stock photos)."""
+        voice = voice_for_tone(storyboard.intent.tone)
+        clips: list[tuple[float, Path]] = []
+
+        for scene, offset, render_duration in zip(storyboard.scenes, offsets, durations):
+            text = (scene.narration or "").strip()
+            if not text:
+                continue
+            stem = tmp_dir / f"scene_{scene.index:02d}_voice"
+            audio_path = synthesize_narration(text, stem, voice)
+            if audio_path is None:
+                continue
+
+            # The scene's own storyboard duration (not `render_duration`,
+            # which is padded by the outgoing transition's overlap) is the
+            # honest window this line has before the next one starts. A
+            # line that runs long gets sped up (capped, so it never turns
+            # into a chipmunk) rather than talking over the next scene.
+            window = max(1.0, scene.duration_seconds + 0.8)
+            spoken_duration = _probe_duration(audio_path)
+            if spoken_duration and spoken_duration > window:
+                speed = min(1.35, spoken_duration / window)
+                sped_path = tmp_dir / f"scene_{scene.index:02d}_voice_fit{audio_path.suffix}"
+                try:
+                    _run([FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(audio_path),
+                          "-filter:a", f"atempo={speed:.3f}", str(sped_path)])
+                    audio_path = sped_path
+                except Exception:
+                    pass  # keep the untrimmed line rather than lose it entirely
+
+            clips.append((offset, audio_path))
+            _release_memory()
+
+        if not clips:
+            return None
+
+        narration_path = tmp_dir / "narration.wav"
+        inputs: list[str] = []
+        for _, path in clips:
+            inputs += ["-i", str(path)]
+
+        delay_parts = []
+        for i, (offset, _) in enumerate(clips):
+            delay_ms = max(0, round(offset * 1000))
+            delay_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[d{i}]")
+        mix_labels = "".join(f"[d{i}]" for i in range(len(clips)))
+        filter_complex = (
+            ";".join(delay_parts)
+            + f";{mix_labels}amix=inputs={len(clips)}:duration=longest:normalize=0[out]"
+        )
+        cmd = (
+            [FFMPEG_BIN, "-y", "-loglevel", "error"]
+            + inputs
+            + ["-filter_complex", filter_complex, "-map", "[out]",
+               "-t", f"{total_duration:.3f}", str(narration_path)]
+        )
+        try:
+            _run(cmd)
+        except Exception:
+            return None
+        return narration_path if narration_path.exists() else None
+
     # -- stage 2: concat with xfade transitions ------------------------------
 
     def _concat_with_transitions(self, clip_paths, durations, transitions, output_path: Path) -> float:
@@ -483,23 +614,22 @@ class Renderer:
             _run([FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(clip_paths[0]), "-c", "copy", str(output_path)])
             return durations[0]
 
+        offsets, xfade_durs, total_duration = _compute_scene_offsets(durations, transitions)
+
         inputs = []
         for p in clip_paths:
             inputs += ["-i", str(p)]
 
         filter_parts = []
         prev_label = "[0:v]"
-        running_total = durations[0]
         for i in range(1, len(clip_paths)):
-            xfade_type, xfade_dur = _XFADE_BY_TRANSITION[transitions[i]]
-            xfade_dur = min(xfade_dur, durations[i] * 0.9, running_total * 0.9)
-            xfade_dur = max(xfade_dur, 0.05)
-            offset = max(0.0, running_total - xfade_dur)
+            xfade_type, _ = _XFADE_BY_TRANSITION[transitions[i]]
+            xfade_dur = xfade_durs[i - 1]
+            offset = offsets[i]
             out_label = f"[v{i}]"
             filter_parts.append(
                 f"{prev_label}[{i}:v]xfade=transition={xfade_type}:duration={xfade_dur:.3f}:offset={offset:.3f}{out_label}"
             )
-            running_total = running_total + durations[i] - xfade_dur
             prev_label = out_label
 
         filter_complex = ";".join(filter_parts)
@@ -511,16 +641,21 @@ class Renderer:
                "-pix_fmt", "yuv420p", str(output_path)]
         )
         _run(cmd)
-        return running_total
+        return total_duration
 
-    # -- stage 3: synthesize + mux a two-chord music bed ---------------------
+    # -- stage 3: synthesize + mux music (+ narration, if any) ---------------
 
     def _mux_with_music(self, silent_video: Path, storyboard: StoryboardPlan, duration: float,
-                         output_path: Path, variant_seed: int) -> None:
+                         output_path: Path, variant_seed: int, narration_path: Optional[Path] = None) -> None:
         track = self._music_library.pick_track(storyboard.music_mood, variant_seed=variant_seed)
         chord_a_freqs = track.synth_recipe["chord_freqs_hz"]
         chord_b_freqs = track.synth_recipe["chord_b_freqs_hz"]
         amplitude = track.synth_recipe["amplitude"]
+        # Duck the music bed under spoken narration — real editors lower the
+        # music, they don't kill it — so the voice reads clearly without
+        # losing the track entirely.
+        if narration_path is not None:
+            amplitude *= 0.55
         tempo_bpm = track.tempo_bpm
 
         fade_len = min(1.5, duration / 4) if duration > 0.5 else duration / 2
@@ -544,20 +679,38 @@ class Renderer:
         # it reads as a soft "breathing" pulse, not a tremolo effect.
         pulse_hz = max(0.5, (tempo_bpm / 60.0) / 2)
 
-        filter_complex = (
+        music_chain = (
             f"{mix_a_labels}amix=inputs={n_a}:duration=first[a_chordA];"
             f"{mix_b_labels}amix=inputs={n_b}:duration=first[a_chordB];"
             "[a_chordA][a_chordB]concat=n=2:v=0:a=1[a_concat];"
             f"[a_concat]tremolo=f={pulse_hz:.3f}:d=0.25,"
-            f"volume={amplitude},"
-            f"afade=t=in:st=0:d={fade_len:.2f},"
-            f"afade=t=out:st={max(0.0, duration - fade_len):.2f}:d={fade_len:.2f}"
-            "[aout]"
+            f"volume={amplitude}[music]"
         )
+
+        extra_inputs: list[str] = []
+        if narration_path is not None:
+            extra_inputs = ["-i", str(narration_path)]
+            narration_idx = 1 + n_a + n_b
+            filter_complex = (
+                f"{music_chain};"
+                f"[{narration_idx}:a]volume=1.9[voice];"
+                "[music][voice]amix=inputs=2:duration=first:normalize=0[a_mixed];"
+                f"[a_mixed]afade=t=in:st=0:d={fade_len:.2f},"
+                f"afade=t=out:st={max(0.0, duration - fade_len):.2f}:d={fade_len:.2f}"
+                "[aout]"
+            )
+        else:
+            filter_complex = (
+                f"{music_chain};"
+                f"[music]afade=t=in:st=0:d={fade_len:.2f},"
+                f"afade=t=out:st={max(0.0, duration - fade_len):.2f}:d={fade_len:.2f}"
+                "[aout]"
+            )
 
         cmd = (
             [FFMPEG_BIN, "-y", "-loglevel", "error", "-i", str(silent_video)]
             + sine_inputs
+            + extra_inputs
             + [
                 "-filter_complex", filter_complex,
                 "-map", "0:v", "-map", "[aout]",

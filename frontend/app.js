@@ -54,6 +54,8 @@ platformButtons.forEach((btn) => {
   });
 });
 
+const voiceToggle = document.getElementById("voice-toggle");
+
 createBtn.addEventListener("click", async () => {
   const description = descriptionEl.value.trim();
   describeError.hidden = true;
@@ -73,6 +75,9 @@ createBtn.addEventListener("click", async () => {
     if (selectedPlatform) {
       form.append("platform", selectedPlatform);
     }
+    // Narration defaults on server-side too; we only need to say something
+    // when the person has switched it off.
+    form.append("voice", voiceToggle.checked ? "on" : "off");
     for (const file of mediaInput.files) {
       form.append("media", file);
     }
@@ -102,6 +107,9 @@ const progressFillEl = document.getElementById("progress-fill");
 // Friendly copy per backend status, in the order the pipeline runs. Width
 // gives the user a sense of motion even though we don't know exact timing.
 const STAGE_ORDER = ["queued", "parsing", "storyboarding", "selecting_media", "rendering", "done"];
+// "Recording narration..." is sent as a `rendering`-status progress message
+// (see renderer.py's `_notify("Recording narration...")`), so it's handled
+// by `renderingWidthPercent` below rather than needing its own stage here.
 const STAGE_WIDTH = {
   queued: "8%",
   parsing: "20%",
@@ -114,10 +122,12 @@ const STAGE_WIDTH = {
 // The "rendering" status covers everything from the first scene clip to the
 // final muxed file, and the backend now sends per-scene progress messages
 // ("Rendering scene 2 of 4...", "Combining scenes...", "Adding music...")
-// instead of one flat message for the whole stage. This maps those messages
-// onto a width within [RENDERING_START, RENDERING_END] so the bar keeps
-// moving smoothly through what's usually the longest stage, rather than
-// sitting at a fixed 90% for the whole render.
+// instead of one flat message for the whole stage. It may also send
+// "Recording narration..." right after the last scene (see renderer.py's
+// `_build_narration_track`), when spoken narration is on. This maps those
+// messages onto a width within [RENDERING_START, RENDERING_END] so the bar
+// keeps moving smoothly (and never backward) through what's usually the
+// longest stage, rather than sitting at a fixed 90% for the whole render.
 const RENDERING_START = 68;
 const RENDERING_END = 96;
 
@@ -128,11 +138,12 @@ function renderingWidthPercent(message) {
     const current = Number(sceneMatch[1]);
     const total = Number(sceneMatch[2]) || 1;
     // Per-scene rendering is the bulk of the work; leave the tail of the
-    // range for the combine/music steps that follow the last scene.
-    const sceneShare = 0.75;
+    // range for the narration/combine/music steps that follow the last scene.
+    const sceneShare = 0.7;
     const fraction = Math.min(1, (current - 1) / total) * sceneShare;
     return RENDERING_START + fraction * span;
   }
+  if (/Recording narration/i.test(message || "")) return RENDERING_START + span * 0.78;
   if (/Combining scenes/i.test(message || "")) return RENDERING_START + span * 0.85;
   if (/Adding music/i.test(message || "")) return RENDERING_START + span * 0.95;
   return RENDERING_START;
@@ -240,5 +251,6 @@ startOverBtn.addEventListener("click", () => {
     b.classList.remove("shape-btn--selected");
     b.setAttribute("aria-pressed", "false");
   });
+  voiceToggle.checked = true;
   showScreen("describe");
 });

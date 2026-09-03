@@ -1,10 +1,12 @@
 FROM python:3.11-slim
 
 # System ffmpeg + fonts (matches the fonts bundled for the desktop app, so
-# rendering looks identical) — real apt access here, so no need for a
-# bundled ffmpeg binary like the sandboxed macOS launch path uses.
+# rendering looks identical) — real apt access here, unlike the sandboxed
+# macOS launch path, so no need for a bundled ffmpeg binary. espeak-ng is
+# voiceover.py's fully-offline fallback narrator, used only if the primary
+# (natural, network-based) voice can't be reached from this host.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg fontconfig fonts-dejavu-core fonts-liberation \
+        ffmpeg fontconfig fonts-dejavu-core fonts-liberation espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

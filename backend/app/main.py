@@ -3,10 +3,12 @@ FastAPI API layer — the only thing the frontend talks to.
 
 Deliberately tiny surface area (see ARCHITECTURE.md section 5/6): there is
 no endpoint that lets the frontend choose occasion/tone/palette/etc. Those
-only ever come out of the pipeline. The one deliberate exception is
-`platform`: an explicit aspect-ratio choice from the frontend's picker,
+only ever come out of the pipeline. The deliberate exceptions are
+`platform` — an explicit aspect-ratio choice from the frontend's picker,
 which — when the person picks one — overrides whatever IntentParser would
-have inferred from the text alone (see `_apply_platform_override`).
+have inferred from the text alone (see `_apply_platform_override`) — and
+`voice`, which lets the person turn the (on-by-default) spoken narration
+off (see `_apply_voice_override`).
 
   POST /api/videos             — start a job from text (+ optional media)
   GET  /api/videos/{id}        — poll status / get result metadata
@@ -97,6 +99,21 @@ def _apply_platform_override(intent, platform_override: Optional[str]):
     return intent.model_copy(update={"platform": platform})
 
 
+def _apply_voice_override(intent, voice_param: Optional[str]):
+    """Narration is on by default (see Renderer._voice_enabled); the
+    frontend's "Add spoken narration" toggle only ever needs to send this
+    when the person turns it OFF. Stored in `overrides` — exactly the
+    hidden-flag mechanism that field exists for — so it needs no schema
+    change and rides along with the storyboard into `variant` regenerations
+    for free."""
+    if voice_param is None:
+        return intent
+    off = voice_param.strip().lower() in {"off", "false", "0", "no"}
+    overrides = dict(intent.overrides)
+    overrides["voice"] = "off" if off else "on"
+    return intent.model_copy(update={"overrides": overrides})
+
+
 # --------------------------------------------------------------------------
 # Response schemas (kept separate from the internal RenderJob so the API
 # never leaks internal fields like file-system paths).
@@ -137,11 +154,12 @@ def _to_status_response(job: RenderJob) -> JobStatusResponse:
 # at each step (see brief section 6).
 # --------------------------------------------------------------------------
 
-def _run_pipeline(job_id: str, description: str, uploaded_paths: list[str], platform_override: Optional[str] = None, variant_seed: int = 0) -> None:
+def _run_pipeline(job_id: str, description: str, uploaded_paths: list[str], platform_override: Optional[str] = None, voice_override: Optional[str] = None, variant_seed: int = 0) -> None:
     try:
         job_store.update(job_id, status=JobStatus.PARSING, progress_message="Understanding your description...")
         intent = _intent_parser.parse(description, has_media=bool(uploaded_paths))
         intent = _apply_platform_override(intent, platform_override)
+        intent = _apply_voice_override(intent, voice_override)
 
         job_store.update(job_id, status=JobStatus.STORYBOARDING, progress_message="Writing your story...")
         storyboard = _storyboard_generator.generate(intent)
@@ -184,6 +202,7 @@ async def create_video(
     background_tasks: BackgroundTasks,
     description: str = Form(""),
     platform: Optional[str] = Form(None),
+    voice: Optional[str] = Form(None),
     media: list[UploadFile] = File(default=[]),
 ) -> CreateVideoResponse:
     if not description or not description.strip():
@@ -205,7 +224,7 @@ async def create_video(
         saved_paths.append(str(dest))
 
     job_store.set_uploaded_paths(job.job_id, saved_paths)
-    background_tasks.add_task(_run_pipeline, job.job_id, description, saved_paths, platform)
+    background_tasks.add_task(_run_pipeline, job.job_id, description, saved_paths, platform, voice)
     return CreateVideoResponse(job_id=job.job_id)
 
 

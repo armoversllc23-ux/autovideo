@@ -5,4 +5,12 @@ python-multipart>=0.0.9
 Pillow>=10.0
 pytest>=8.0
 
-# System dependency (not pip-installable): ffmpeg + ffprobe must be on PATH.
+# Free, keyless text-to-speech for scene narration (see voiceover.py):
+# Microsoft Edge's public neural-voice endpoint, no signup/API key/paid
+# tier — the same "free" bar every other dependency in this app has to
+# clear.
+edge-tts>=6.1,<8
+
+# System dependencies (not pip-installable): ffmpeg + ffprobe must be on
+# PATH, and espeak-ng should be on PATH as voiceover.py's fully-offline
+# fallback narrator (used only if edge-tts's network path is unreachable).
